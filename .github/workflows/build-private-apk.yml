@@ -118,7 +118,8 @@ jobs:
           # Android application module, discovered from the checkout.
           APP_MODULE=""
           while IFS= read -r file; do
-            if grep -qE 'com\.android\.application|alias\(libs\.plugins\.android\.application\)' "$file"; then
+            if grep -qE 'com\.android\.application|alias\(libs\.plugins\.android\.application\)' "$file" \
+               && ! grep -qE 'apply[[:space:]]+false' "$file"; then
               APP_MODULE=$(basename "$(dirname "$file")")
               break
             fi
