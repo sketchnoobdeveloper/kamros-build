@@ -63,9 +63,17 @@ jobs:
             | grep -oE '[0-9]+' | sort -n | tail -1 || true)
           JAVA_VERSION=${JAVA_VERSION:-17}
 
-          # Gradle project root: where settings.gradle(.kts) actually lives.
-          GRADLE_ROOT=$(find . -maxdepth 3 \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) -type f \
-            | head -1 | xargs -r dirname)
+          # Gradle project root: the settings.gradle(.kts) whose build contains
+          # an Android application plugin (repos can have several Gradle builds).
+          GRADLE_ROOT=""
+          while IFS= read -r settings; do
+            dir=$(dirname "$settings")
+            if grep -rqE 'com\.android\.application|alias\(libs\.plugins\.android\.application\)' \
+                 --include='build.gradle.kts' --include='build.gradle' "$dir"; then
+              GRADLE_ROOT="$dir"
+              break
+            fi
+          done < <(find . -maxdepth 4 \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) -type f)
           GRADLE_ROOT=${GRADLE_ROOT:-.}
 
           # Gradle version: use the checked-in wrapper when present. Otherwise
