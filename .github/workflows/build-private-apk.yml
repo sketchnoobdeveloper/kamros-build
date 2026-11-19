@@ -266,3 +266,55 @@ jobs:
             ${{ steps.apk.outputs.glob_nested }}
           if-no-files-found: error
           retention-days: 14
+
+  verify:
+    name: Typecheck worker and compile CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate read-only source token
+        shell: bash
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          if [ -z "${PRIVATE_REPO_TOKEN}" ]; then
+            echo "::error::PRIVATE_REPO_TOKEN secret is missing."
+            exit 1
+          fi
+
+      - name: Checkout private source (read-only token)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.source_ref || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: ${{ env.SOURCE_DIR }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Typecheck worker
+        working-directory: source/worker
+        run: |
+          npm install --no-audit --no-fund
+          npm run typecheck
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Compile ingest CLI
+        working-directory: source/cli
+        run: gradle --no-daemon build
