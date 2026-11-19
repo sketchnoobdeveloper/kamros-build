@@ -239,22 +239,29 @@ jobs:
         run: |
           set -euo pipefail
           APK_DIR="$GRADLE_ROOT/$APP_MODULE/build/outputs/apk/debug"
+          echo "APK search root: $(pwd)/$APK_DIR"
+          find "$APK_DIR" -maxdepth 5 -type f 2>/dev/null | head -40 || true
           COUNT=$(find "$APK_DIR" -type f -name '*.apk' 2>/dev/null | wc -l)
           if [ "$COUNT" -eq 0 ]; then
             echo "::error::No debug APK produced under $APK_DIR"
             exit 1
           fi
-          echo "glob=source/$APK_DIR/*.apk" >> "$GITHUB_OUTPUT"
+          {
+            echo "glob=source/$APK_DIR/*.apk"
+            echo "glob_nested=source/$APK_DIR/**/*.apk"
+          } >> "$GITHUB_OUTPUT"
           echo "dir=$APK_DIR" >> "$GITHUB_OUTPUT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           echo "### Build output" >> "$GITHUB_STEP_SUMMARY"
           echo "- APKs produced: ${COUNT}" >> "$GITHUB_STEP_SUMMARY"
-          find "$APK_DIR" -type f -name '*.apk' -printf '- %f (%s bytes)\n' >> "$GITHUB_STEP_SUMMARY"
+          find "$APK_DIR" -type f -name '*.apk' -printf '- %p (%s bytes)\n' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: kamros-debug-apks
-          path: ${{ steps.apk.outputs.glob }}
+          path: |
+            ${{ steps.apk.outputs.glob }}
+            ${{ steps.apk.outputs.glob_nested }}
           if-no-files-found: error
           retention-days: 14
