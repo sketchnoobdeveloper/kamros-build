@@ -75,6 +75,7 @@ jobs:
             fi
           done < <(find . -maxdepth 4 \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) -type f)
           GRADLE_ROOT=${GRADLE_ROOT:-.}
+          GRADLE_ROOT=${GRADLE_ROOT#./}
 
           # Gradle version: use the checked-in wrapper when present. Otherwise
           # derive it from the Android Gradle Plugin version in the checkout.
