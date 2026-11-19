@@ -1,0 +1,251 @@
+name: Build KamRos (private source)
+
+# This workflow lives in a PUBLIC repository and contains NO application
+# source code. It checks out the private KamRos source repository with a
+# short-lived, read-only token supplied as the PRIVATE_REPO_TOKEN secret,
+# detects the project's real toolchain/SDK requirements from the checkout,
+# builds the debug APK and uploads only the APK as an Actions artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Branch, tag or commit in the private KamRos repository'
+        required: false
+        default: 'main'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: sketchnoobdeveloper/KamRos
+  SOURCE_DIR: source
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Validate read-only source token
+        shell: bash
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          if [ -z "${PRIVATE_REPO_TOKEN}" ]; then
+            echo "::error::PRIVATE_REPO_TOKEN is missing. Add a fine-grained PAT with Contents: read on ${SOURCE_REPO}."
+            exit 1
+          fi
+
+      - name: Checkout private source (read-only token)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.source_ref || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: ${{ env.SOURCE_DIR }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Discover build requirements from the source
+        id: detect
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+
+          # Java: AGP's JavaVersion.VERSION_17 / Kotlin's jvmTarget = "17".
+          JAVA_VERSION=$(grep -rhoE 'JavaVersion\.VERSION_[0-9]+|jvmTarget[[:space:]]*=[[:space:]]*"[0-9]+"' \
+            --include='*.gradle.kts' --include='*.gradle' . \
+            | grep -oE '[0-9]+' | sort -n | tail -1 || true)
+          JAVA_VERSION=${JAVA_VERSION:-17}
+
+          # Gradle project root: where settings.gradle(.kts) actually lives.
+          GRADLE_ROOT=$(find . -maxdepth 3 \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) -type f \
+            | head -1 | xargs -r dirname)
+          GRADLE_ROOT=${GRADLE_ROOT:-.}
+
+          # Gradle version: use the checked-in wrapper when present. Otherwise
+          # derive it from the Android Gradle Plugin version in the checkout.
+          if [ -f "$GRADLE_ROOT/gradlew" ]; then
+            USE_WRAPPER=true
+            GRADLE_VERSION=$(grep -oE 'gradle-[0-9]+(\.[0-9]+)+' \
+              "$GRADLE_ROOT/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null \
+              | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)
+            GRADLE_VERSION=${GRADLE_VERSION:-wrapper}
+          else
+            USE_WRAPPER=false
+            AGP_VERSION=$(grep -rhoE 'agp[[:space:]]*=[[:space:]]*"[0-9.]+"|com\.android\.tools\.build:gradle:[0-9.]+' \
+              --include='*.toml' --include='*.gradle.kts' --include='*.gradle' . \
+              | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
+            case "$AGP_VERSION" in
+              8.7*) GRADLE_VERSION=8.9 ;;
+              8.6*) GRADLE_VERSION=8.7 ;;
+              8.5*) GRADLE_VERSION=8.7 ;;
+              8.4*) GRADLE_VERSION=8.6 ;;
+              8.3*) GRADLE_VERSION=8.5 ;;
+              *)    GRADLE_VERSION=8.9 ;;
+            esac
+          fi
+
+          # SDK: compileSdk from the Android Gradle module.
+          COMPILE_SDK=$(grep -rhoE 'compileSdk[[:space:]]*=[[:space:]]*[0-9]+' \
+            --include='*.gradle.kts' --include='*.gradle' . \
+            | grep -oE '[0-9]+' | sort -n | tail -1 || true)
+          COMPILE_SDK=${COMPILE_SDK:-35}
+          BUILD_TOOLS="${COMPILE_SDK}.0.0"
+
+          # Optional native toolchain: only install when the project asks for it.
+          NDK_VERSION=$(grep -rhoE 'ndkVersion[[:space:]]*=[[:space:]]*"[0-9.]+"' \
+            --include='*.gradle.kts' --include='*.gradle' . \
+            | grep -oE '[0-9][0-9.]*' | head -1 || true)
+          CMAKE_VERSION=$(grep -rhA4 'externalNativeBuild' \
+            --include='*.gradle.kts' --include='*.gradle' . 2>/dev/null \
+            | grep -oE 'version[[:space:]]*=[[:space:]]*"[0-9.]+"' \
+            | grep -oE '[0-9][0-9.]*' | head -1 || true)
+
+          # Android application module, discovered from the checkout.
+          APP_MODULE=""
+          while IFS= read -r file; do
+            if grep -qE 'com\.android\.application|alias\(libs\.plugins\.android\.application\)' "$file"; then
+              APP_MODULE=$(basename "$(dirname "$file")")
+              break
+            fi
+          done < <(find "$GRADLE_ROOT" -maxdepth 3 \( -name 'build.gradle.kts' -o -name 'build.gradle' \) -type f)
+          APP_MODULE=${APP_MODULE:-app}
+
+          {
+            echo "java_version=${JAVA_VERSION}"
+            echo "gradle_root=${GRADLE_ROOT}"
+            echo "use_wrapper=${USE_WRAPPER}"
+            echo "gradle_version=${GRADLE_VERSION}"
+            echo "compile_sdk=${COMPILE_SDK}"
+            echo "build_tools=${BUILD_TOOLS}"
+            echo "ndk_version=${NDK_VERSION}"
+            echo "cmake_version=${CMAKE_VERSION}"
+            echo "app_module=${APP_MODULE}"
+            echo "assemble_task=:${APP_MODULE}:assembleDebug"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Discovered build requirements"
+            echo "- Java: ${JAVA_VERSION}"
+            echo "- Gradle root: ${GRADLE_ROOT}"
+            echo "- Gradle: ${GRADLE_VERSION} (wrapper: ${USE_WRAPPER})"
+            echo "- compileSdk: ${COMPILE_SDK}, build-tools: ${BUILD_TOOLS}"
+            echo "- NDK: ${NDK_VERSION:-not required}"
+            echo "- CMake: ${CMAKE_VERSION:-not required}"
+            echo "- Android application module: ${APP_MODULE}"
+            echo "- Build task: :${APP_MODULE}:assembleDebug"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up JDK ${{ steps.detect.outputs.java_version }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ steps.detect.outputs.java_version }}
+          cache: gradle
+          cache-dependency-path: |
+            source/**/*.gradle.kts
+            source/**/libs.versions.toml
+
+      - name: Set up Gradle ${{ steps.detect.outputs.gradle_version }}
+        if: steps.detect.outputs.use_wrapper != 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.detect.outputs.gradle_version }}
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER=$(find "$SDK_ROOT/cmdline-tools" -maxdepth 3 -type f -name sdkmanager 2>/dev/null | sort -V | tail -1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found under $SDK_ROOT/cmdline-tools"
+            exit 1
+          fi
+          export PATH="$(dirname "$SDKMANAGER"):$PATH"
+          SDK_PACKAGES="platforms;android-${{ steps.detect.outputs.compile_sdk }} build-tools;${{ steps.detect.outputs.build_tools }}"
+          if [ -n "${{ steps.detect.outputs.ndk_version }}" ]; then
+            SDK_PACKAGES="$SDK_PACKAGES ndk;${{ steps.detect.outputs.ndk_version }}"
+          fi
+          if [ -n "${{ steps.detect.outputs.cmake_version }}" ]; then
+            SDK_PACKAGES="$SDK_PACKAGES cmake;${{ steps.detect.outputs.cmake_version }}"
+          fi
+          for package in $SDK_PACKAGES; do
+            yes | sdkmanager --licenses >/dev/null 2>&1 || true
+            sdkmanager --install "$package"
+          done
+
+      - name: Configure local build properties (placeholders only)
+        shell: bash
+        working-directory: source
+        env:
+          GRADLE_ROOT: ${{ steps.detect.outputs.gradle_root }}
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          cat > "$GRADLE_ROOT/local.properties" <<EOF
+          sdk.dir=$SDK_ROOT
+          kamros.supabaseUrl=https://placeholder.supabase.co
+          kamros.anonKey=placeholder-anon-key
+          kamros.workerUrl=https://kamros.workers.dev
+          kamros.updateUrl=https://kamros.workers.dev/update.json
+          EOF
+
+      - name: Build debug APK
+        shell: bash
+        working-directory: source
+        env:
+          GRADLE_ROOT: ${{ steps.detect.outputs.gradle_root }}
+          USE_WRAPPER: ${{ steps.detect.outputs.use_wrapper }}
+          ASSEMBLE_TASK: ${{ steps.detect.outputs.assemble_task }}
+          GRADLE_OPTS: >-
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8"
+            -Dorg.gradle.workers.max=2
+            -Dorg.gradle.parallel=false
+        run: |
+          set -euo pipefail
+          cd "$GRADLE_ROOT"
+          if [ "$USE_WRAPPER" = "true" ]; then
+            chmod +x ./gradlew
+            GRADLE_CMD=./gradlew
+          else
+            GRADLE_CMD=gradle
+          fi
+          "$GRADLE_CMD" "$ASSEMBLE_TASK" --no-daemon --max-workers=2 --stacktrace \
+            -Pkotlin.compiler.execution.strategy=in-process
+
+      - name: Verify APK output
+        id: apk
+        shell: bash
+        working-directory: source
+        env:
+          GRADLE_ROOT: ${{ steps.detect.outputs.gradle_root }}
+          APP_MODULE: ${{ steps.detect.outputs.app_module }}
+        run: |
+          set -euo pipefail
+          APK_DIR="$GRADLE_ROOT/$APP_MODULE/build/outputs/apk/debug"
+          COUNT=$(find "$APK_DIR" -type f -name '*.apk' 2>/dev/null | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No debug APK produced under $APK_DIR"
+            exit 1
+          fi
+          echo "glob=source/$APK_DIR/*.apk" >> "$GITHUB_OUTPUT"
+          echo "dir=$APK_DIR" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "### Build output" >> "$GITHUB_STEP_SUMMARY"
+          echo "- APKs produced: ${COUNT}" >> "$GITHUB_STEP_SUMMARY"
+          find "$APK_DIR" -type f -name '*.apk' -printf '- %f (%s bytes)\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kamros-debug-apks
+          path: ${{ steps.apk.outputs.glob }}
+          if-no-files-found: error
+          retention-days: 14
