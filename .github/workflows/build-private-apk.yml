@@ -191,20 +191,23 @@ jobs:
             sdkmanager --install "$package"
           done
 
-      - name: Configure local build properties (placeholders only)
+      - name: Configure local build properties
         shell: bash
         working-directory: source
         env:
           GRADLE_ROOT: ${{ steps.detect.outputs.gradle_root }}
+          SUPA_URL: ${{ secrets.KAMROS_SUPABASE_URL }}
+          ANON_KEY: ${{ secrets.KAMROS_ANON_KEY }}
+          WORKER: ${{ secrets.KAMROS_WORKER_URL }}
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           cat > "$GRADLE_ROOT/local.properties" <<EOF
           sdk.dir=$SDK_ROOT
-          kamros.supabaseUrl=https://placeholder.supabase.co
-          kamros.anonKey=placeholder-anon-key
-          kamros.workerUrl=https://kamros.workers.dev
-          kamros.updateUrl=https://kamros.workers.dev/update.json
+          kamros.supabaseUrl=${SUPA_URL:-https://placeholder.supabase.co}
+          kamros.anonKey=${ANON_KEY:-placeholder-anon-key}
+          kamros.workerUrl=${WORKER:-https://kamros.workers.dev}
+          kamros.updateUrl=${WORKER:-https://kamros.workers.dev}/update.json
           EOF
 
       - name: Build debug APK
